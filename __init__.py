@@ -1,127 +1,170 @@
-import bpy
-import bmesh
-
 bl_info = {
-    "name": "UV Material Sync",
+    "name": "UV Editor Texturing",
     "author": "AlexandrCG",
-    "version": (1.81),
-    "blender": (5, 0, 1),
-    "location": "Automated (UV Editor <-> 3D View)",
-    "description": "Syncs UV Editor image with selected face material and vice versa",
+    "version": (2, 0),
+    "blender": (4, 0, 0),
+    "location": "UV Editor <-> 3D Viewport",
+    "description": "Automatic synchronization between selected face materials and UV Editor images",
     "category": "UV",
 }
 
-last_image_name = ""
-last_selected_faces_key = None  # frozenset пар (индекс грани, индекс материала)
+import bpy
+import bmesh
 
+class SyncState:
+    """Stores the last known state to prevent redundant updates and infinite loops."""
+    last_image_name = ""
+    last_selection_hash = None
 
-def get_image_from_material(mat):
-    if mat and mat.use_nodes and mat.node_tree:
+def get_image_from_material(mat: bpy.types.Material) -> bpy.types.Image:
+    """
+    Finds the first Image Texture node in the material's node tree.
+    Returns the associated image or None.
+    """
+    if mat and mat.use_nodes:
         for node in mat.node_tree.nodes:
             if node.type == 'TEX_IMAGE' and node.image:
                 return node.image
     return None
 
+def get_active_uv_space(context: bpy.types.Context):
+    """Returns the active space of the first found Image Editor area."""
+    for area in context.screen.areas:
+        if area.type == 'IMAGE_EDITOR':
+            return area.spaces.active
+    return None
 
-def sync_logic(context):
-    global last_image_name, last_selected_faces_key
+def ensure_material_for_image(image: bpy.types.Image, obj: bpy.types.Object) -> int:
+    """
+    Ensures a material with the specified image exists and is assigned to the object.
+    Returns the index of the material slot.
+    """
+    # Try to find an existing material in the blend file with this image
+    mat = next((m for m in bpy.data.materials if get_image_from_material(m) == image), None)
+    
+    # If not found, create a new one with a standard Principled BSDF setup
+    if not mat:
+        mat = bpy.data.materials.new(name=f"Mat_{image.name}")
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        
+        tex_node = nodes.new('ShaderNodeTexImage')
+        tex_node.image = image
+        bsdf = nodes.get("Principled BSDF") or nodes.new('ShaderNodeBsdfPrincipled')
+        links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
 
+    # Add material to object slots if not already present
+    if mat.name not in obj.data.materials:
+        obj.data.materials.append(mat)
+        
+    return obj.data.materials.find(mat.name)
+
+# --- Logic 1: UV Editor Image Changes -> Update Face Materials (Timer-based) ---
+def uv_to_mesh_poll():
+    """Monitors the UV Editor image and applies it to selected faces in 3D View."""
+    context = bpy.context
     obj = context.active_object
-    if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
-        return
+    
+    # Only run in Mesh Edit Mode
+    if not (obj and obj.mode == 'EDIT' and obj.type == 'MESH'):
+        return 0.1
+        
+    uv_space = get_active_uv_space(context)
+    if not uv_space or not uv_space.image:
+        return 0.1
 
-    uv_area = next((a for a in context.screen.areas if a.type == 'IMAGE_EDITOR'), None)
-    if not uv_area:
-        return
-
-    img_editor = uv_area.spaces.active
+    # Check if the image in the UV editor has changed since the last check
+    current_img = uv_space.image
+    if current_img.name == SyncState.last_image_name:
+        return 0.1
+    
+    SyncState.last_image_name = current_img.name
+    mat_index = ensure_material_for_image(current_img, obj)
+    
+    # Apply material index to all selected faces
     bm = bmesh.from_edit_mesh(obj.data)
-
     selected_faces = [f for f in bm.faces if f.select]
+    
+    if selected_faces:
+        for face in selected_faces:
+            face.material_index = mat_index
+        bmesh.update_edit_mesh(obj.data)
+        
+        # Update hash to prevent Direction 2 from firing immediately
+        SyncState.last_selection_hash = hash(tuple((f.index, mat_index) for f in selected_faces))
+        for area in context.screen.areas:
+            area.tag_redraw()
 
-    # Ключ текущего выделения: frozenset пар (индекс грани, индекс материала)
-    current_key = frozenset((f.index, f.material_index) for f in selected_faces)
+    return 0.1
 
-    # --- НАПРАВЛЕНИЕ А: От Полигона к Редактору ---
-    if current_key != last_selected_faces_key:
-        last_selected_faces_key = current_key
-
-        if selected_faces:
-            # Собираем уникальные материалы среди выделенных полигонов
-            unique_mat_names = set()
-            for face in selected_faces:
-                if obj.data.materials and face.material_index < len(obj.data.materials):
-                    mat = obj.data.materials[face.material_index]
-                    if mat:
-                        unique_mat_names.add(mat.name)
-
-            # Синхронизируем ТОЛЬКО если у всех полигонов один и тот же материал
-            if len(unique_mat_names) == 1:
-                mat = bpy.data.materials.get(next(iter(unique_mat_names)))
-                face_img = get_image_from_material(mat)
-                if face_img and (not img_editor.image or img_editor.image != face_img):
-                    img_editor.image = face_img
-                    last_image_name = face_img.name
-                    uv_area.tag_redraw()
-
-            # Если материалы разные — не трогаем редактор
-
-        return  # Выделение изменилось — не проверяем Направление Б в этот тик
-
-    # --- НАПРАВЛЕНИЕ Б: От Редактора к Полигонам ---
-    current_img = img_editor.image
-    if current_img and current_img.name != last_image_name:
-        last_image_name = current_img.name
-
-        target_mat = None
-        for mat in bpy.data.materials:
-            if mat and mat.use_nodes and get_image_from_material(mat) == current_img:
-                target_mat = mat
-                break
-
-        if not target_mat:
-            target_mat = bpy.data.materials.new(name=f"Mat_{current_img.name}")
-            target_mat.use_nodes = True
-            nodes = target_mat.node_tree.nodes
-            node_tex = nodes.new(type='ShaderNodeTexImage')
-            node_tex.image = current_img
-            node_bsdf = nodes.get("Principled BSDF") or nodes.new(type='ShaderNodeBsdfPrincipled')
-            target_mat.node_tree.links.new(node_tex.outputs['Color'], node_bsdf.inputs['Base Color'])
-
-        if target_mat.name not in obj.data.materials:
-            obj.data.materials.append(target_mat)
-
-        mat_idx = obj.data.materials.find(target_mat.name)
-
-        if selected_faces:
-            for face in selected_faces:
-                face.material_index = mat_idx
-            bmesh.update_edit_mesh(obj.data)
-            context.view_layer.update()
-
-            # Обновляем ключ, чтобы не сработало Направление А сразу после
-            last_selected_faces_key = frozenset((f.index, mat_idx) for f in selected_faces)
-
-
+# --- Logic 2: Selection/Material Changes -> Update UV Editor Image (Depsgraph-based) ---
 @bpy.app.handlers.persistent
-def auto_sync_handler(scene):
-    sync_logic(bpy.context)
+def mesh_to_uv_handler(scene, depsgraph):
+    """Monitors face selection in 3D View and updates the UV Editor image."""
+    context = bpy.context
+    obj = context.active_object
+    
+    if not (obj and obj.mode == 'EDIT' and obj.type == 'MESH'):
+        return
+        
+    uv_space = get_active_uv_space(context)
+    if not uv_space:
+        return
 
+    bm = bmesh.from_edit_mesh(obj.data)
+    selected_faces = [f for f in bm.faces if f.select]
+    if not selected_faces:
+        return
 
+    # Check if selection or material assignment has changed via hash
+    current_hash = hash(tuple((f.index, f.material_index) for f in selected_faces))
+    if current_hash == SyncState.last_selection_hash:
+        return
+    
+    SyncState.last_selection_hash = current_hash
+    
+    # Identify unique images across selected faces
+    mats = obj.data.materials
+    images = {get_image_from_material(mats[f.material_index]) 
+              for f in selected_faces if f.material_index < len(mats)}
+    images.discard(None)
+
+    # If all selected faces share exactly one image, display it in the UV Editor
+    # If all selected faces share exactly one image, display it in the UV Editor
+    if len(images) == 1:
+        img = images.pop()
+        if uv_space.image != img:
+            uv_space.image = img
+            # Ensure the image updates visually (especially for sequences)
+            if uv_space.image_user:
+                uv_space.image_user.use_auto_refresh = True
+            
+            SyncState.last_image_name = img.name
+            for area in context.screen.areas:
+                if area.type == 'IMAGE_EDITOR':
+                    area.tag_redraw()
+
+# --- Registration ---
 def register():
-    handlers = bpy.app.handlers.depsgraph_update_post
-    for h in handlers:
-        if h.__name__ == "auto_sync_handler":
-            handlers.remove(h)
-    handlers.append(auto_sync_handler)
+    # Clean up handlers before registering to avoid duplicates
+    unregister_handlers()
+    bpy.app.handlers.depsgraph_update_post.append(mesh_to_uv_handler)
+    
+    if not bpy.app.timers.is_registered(uv_to_mesh_poll):
+        bpy.app.timers.register(uv_to_mesh_poll, persistent=True)
 
+def unregister_handlers():
+    """Removes the depsgraph handler safely."""
+    handlers = bpy.app.handlers.depsgraph_update_post
+    for h in list(handlers):
+        if h.__name__ == "mesh_to_uv_handler":
+            handlers.remove(h)
 
 def unregister():
-    handlers = bpy.app.handlers.depsgraph_update_post
-    for h in handlers:
-        if h.__name__ == "auto_sync_handler":
-            handlers.remove(h)
-
+    unregister_handlers()
+    if bpy.app.timers.is_registered(uv_to_mesh_poll):
+        bpy.app.timers.unregister(uv_to_mesh_poll)
 
 if __name__ == "__main__":
     register()
