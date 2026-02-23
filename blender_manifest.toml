@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "uv_editor_texturing"
+version = "1.8.0"
+name = "UV Editor Texturing"
+tagline = "Syncs UV Editor texture with selected face material"
+maintainer = "AlexandrCG"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+category = "UV"
