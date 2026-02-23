@@ -9,4 +9,4 @@ support = "https://github.com/Aless256/uv_editor_texturing"
 type = "add-on"
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
-tags = ["UV", "Workflow", "Material"]
+tags = ["UV"]
