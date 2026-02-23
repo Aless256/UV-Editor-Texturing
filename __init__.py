@@ -4,7 +4,7 @@ import bmesh
 bl_info = {
     "name": "UV Material Sync",
     "author": "AlexandrCG",
-    "version": (1.8),
+    "version": (1.81),
     "blender": (5, 0, 1),
     "location": "Automated (UV Editor <-> 3D View)",
     "description": "Syncs UV Editor image with selected face material and vice versa",

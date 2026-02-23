@@ -1,10 +1,11 @@
 schema_version = "1.0.0"
 
 id = "uv_editor_texturing"
-version = "1.8.0"
+version = "1.8.1"
 name = "UV Editor Texturing"
 tagline = "Syncs UV Editor texture with selected face material"
 maintainer = "AlexandrCG"
+support = "https://github.com/Aless256/uv_editor_texturing"
 type = "add-on"
 
 blender_version_min = "4.2.0"
